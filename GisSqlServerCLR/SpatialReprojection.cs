@@ -123,30 +123,3 @@ namespace GisSqlServerCLR
         }
     }
 }
-
-
-/*
-
-    
-       sp_configure 'show advanced options', 1;  
-       GO  
-       RECONFIGURE;  
-       GO  
-       sp_configure 'clr enabled', 1;  
-       GO  
-       RECONFIGURE;  
-       GO  
-      
-       ALTER DATABASE [GPS_Tracking] SET trustworthy ON
-      
-        CREATE ASSEMBLY GisSqlServerCLR
-        FROM N'D:\GisSqlServerCLR.dll'
-        WITH PERMISSION_SET = UNSAFE
-        GO
-         
-   	CREATE FUNCTION dbo.STTransform(@Geometry geometry, @dst int)
-   	RETURNS geometry
-   	AS
-   	EXTERNAL NAME [GisSqlServerCLR].[GisSqlServerCLR.SpatialReprojection].TransformGeometry;
-
-*/
