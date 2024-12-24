@@ -1,11 +1,11 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio Version 17
-VisualStudioVersion = 17.12.35527.113 d17.12
+# Visual Studio 15
+VisualStudioVersion = 15.0.35116.124
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GisSqlCLR", "GisSqlCLR.csproj", "{15AC23D8-F9A6-4CC8-971F-1908065B47FE}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GisSqlServerCLR", "..\GisSqlServerCLR\GisSqlServerCLR.csproj", "{D14FA2E8-B8B8-4A86-AA6C-13CE73DB68E3}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GisSqlServerCLR", "GisSqlServerCLR\GisSqlServerCLR.csproj", "{A0685130-8C29-4E89-84C4-3D3BD122BA19}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -17,12 +17,15 @@ Global
 		{15AC23D8-F9A6-4CC8-971F-1908065B47FE}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{15AC23D8-F9A6-4CC8-971F-1908065B47FE}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{15AC23D8-F9A6-4CC8-971F-1908065B47FE}.Release|Any CPU.Build.0 = Release|Any CPU
-		{D14FA2E8-B8B8-4A86-AA6C-13CE73DB68E3}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{D14FA2E8-B8B8-4A86-AA6C-13CE73DB68E3}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{D14FA2E8-B8B8-4A86-AA6C-13CE73DB68E3}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{D14FA2E8-B8B8-4A86-AA6C-13CE73DB68E3}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A0685130-8C29-4E89-84C4-3D3BD122BA19}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A0685130-8C29-4E89-84C4-3D3BD122BA19}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A0685130-8C29-4E89-84C4-3D3BD122BA19}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A0685130-8C29-4E89-84C4-3D3BD122BA19}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {9B0CD9C1-22C2-425E-BCCD-B93D0CC605C2}
 	EndGlobalSection
 EndGlobal
