@@ -7,15 +7,18 @@ using Microsoft.SqlServer.Types;
 
     public class SpatialReprojection
     {
-
-        [SqlFunction]
-        public static string TransformWktGeometry(string geometry, int srcProj, int dstProj)
+    [SqlFunction(
+        IsDeterministic = true,
+        IsPrecise = true)]
+    public static SqlString TransformWktGeometry(string geometry, int srcProj, int dstProj)
         {
             string processedGeometry = ProcessWktGeometry(geometry, srcProj, dstProj);
-            return processedGeometry;
+        return new SqlString(processedGeometry);
         }
 
-        [SqlFunction]
+    [SqlFunction(
+        IsDeterministic = true,
+        IsPrecise = true)]
         public static SqlGeometry TransformGeometry(SqlGeometry geometry, int dstProj)
         {
             SqlGeometry processedGeometry = ProcessGeometry(geometry, dstProj);
