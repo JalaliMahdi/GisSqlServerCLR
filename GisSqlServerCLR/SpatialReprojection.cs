@@ -37,8 +37,6 @@ namespace GisSqlServerCLR
         }
 
             SqlChars sqlWkt = geometry.STAsText();
-
-            int srid = sqkSrid.Value;
             string wkt = sqlWkt.ToSqlString().Value;
 
             string processedGeometry = ProcessWktGeometry(wkt, srid, destinationProj4);
