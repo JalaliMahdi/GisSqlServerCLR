@@ -29,6 +29,13 @@ namespace GisSqlServerCLR
         private static SqlGeometry ProcessGeometry(SqlGeometry geometry, int destinationProj4)
         {
             SqlInt32 sqkSrid = geometry.STSrid;
+        int srid = sqkSrid.Value;
+
+        if (srid == destinationProj4)
+        {
+            return geometry;
+        }
+
             SqlChars sqlWkt = geometry.STAsText();
 
             int srid = sqkSrid.Value;
