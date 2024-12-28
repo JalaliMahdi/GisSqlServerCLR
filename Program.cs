@@ -1,10 +1,10 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Data.SqlTypes;
 using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
-using GisSqlServerCLR;
 using Microsoft.SqlServer.Types;
 
 namespace GisSqlCLR
@@ -19,8 +19,8 @@ namespace GisSqlCLR
 
             var a = SpatialReprojection.TransformGeometry(geometry,  4326);
 
-            string transformed = SpatialReprojection.TransformWktGeometry("POINT (54.305529999999997 31.925776599999999)", 4326, 3857);
-            Console.WriteLine($"Tranformed : {transformed}");
+            var transformed = SpatialReprojection.TransformWktGeometry("POINT (54.305529999999997 31.925776599999999)", 4326, 3857);
+            Console.WriteLine($"Tranformed : {transformed.Value}");
         }
     }
 }
