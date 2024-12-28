@@ -59,7 +59,18 @@ Finally, create the custom SQL function for transforming geometries. This functi
 CREATE FUNCTION dbo.STTransform(@Geometry geometry, @dst int)
 RETURNS geometry
 AS
-EXTERNAL NAME [GisSqlServerCLR].[GisSqlServerCLR.SpatialReprojection].TransformGeometry;
+EXTERNAL NAME [GisSqlServerCLR].[SpatialReprojection].TransformGeometry;
+GO
+
+CREATE FUNCTION dbo.STTransformWkt(@wkt NVARCHAR(MAX), @src int, @dst int)
+RETURNS NVARCHAR(MAX)
+AS
+EXTERNAL NAME [GisSqlServerCLR].[SpatialReprojection].TransformWktGeometry;
+GO
+
+CREATE AGGREGATE dbo.STExtent(@geometry GEOMETRY)
+RETURNS NVARCHAR(MAX)
+EXTERNAL NAME [GisSqlServerCLR].[SpatialExtent];
 GO
 ```
 
