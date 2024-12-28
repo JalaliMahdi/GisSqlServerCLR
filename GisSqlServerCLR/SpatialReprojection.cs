@@ -5,8 +5,6 @@ using System.Data.SqlTypes;
 using Microsoft.SqlServer.Server;
 using Microsoft.SqlServer.Types;
 
-namespace GisSqlServerCLR
-{
     public class SpatialReprojection
     {
 
@@ -127,4 +125,3 @@ namespace GisSqlServerCLR
             }
         }
     }
-}
