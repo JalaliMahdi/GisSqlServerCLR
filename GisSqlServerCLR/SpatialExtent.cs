@@ -21,10 +21,10 @@ public class SpatialExtent : IBinarySerialize
 
     public void Init()
     {
-        _minX = double.MaxValue;
-        _minY = double.MaxValue;
-        _maxX = double.MinValue;
-        _maxY = double.MinValue;
+        _minX = 0;
+        _minY = 0;
+        _maxX = 0;
+        _maxY = 0;
         _hasValues = false;
     }
 
