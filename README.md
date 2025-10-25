@@ -1,95 +1,159 @@
-# SQL Server CLR Integration
+# SQL Server CLR Integration - GIS Spatial Functions
 
-This repository provides SQL scripts and instructions for enabling CLR (Common Language Runtime) integration in SQL Server. It also includes a custom SQL function for transforming geometries between different coordinate systems using a CLR assembly.
+SQL Server CLR assembly for coordinate system transformations using DotSpatial.
 
-## Prerequisites
+## Features
 
-Before proceeding, ensure the following requirements are met:
+- **STTransform**: Transform geometry between coordinate systems
+- **STTransformWkt**: Transform WKT strings between coordinate systems  
+- **STExtent**: Calculate bounding box (aggregate function)
 
-- **SQL Server Version**: SQL Server 2012 or later
-- **Database Access**: Sufficient permissions to execute SQL commands and modify database settings
-- **CLR Assembly**: The corresponding DLL file for the assembly (`GisSqlServerCLR.dll`)
+**Supported EPSG Codes**: 4326 (WGS84), 3857 (Web Mercator), 32638-32642 (UTM Zones 38N-42N)
 
-## Installation Guide
+## Quick Start
 
-Follow the steps below to enable CLR integration and set up the geometry transformation function.
+### Prerequisites
+- SQL Server 2012+ (recommended 2016+)
+- `sysadmin` role or assembly permissions
+- .NET Framework 4.8.1
 
-### 1. Enable Advanced Options in SQL Server
+### Installation
 
-To enable CLR integration, execute the following SQL commands:
-
+**Automated Installation:**
 ```sql
--- Enable advanced options
-sp_configure 'show advanced options', 1;  
-GO  
-RECONFIGURE;  
-GO  
+-- 1. Enable CLR
+EXEC sp_configure 'show advanced options', 1; RECONFIGURE;
+EXEC sp_configure 'clr enabled', 1; RECONFIGURE;
 
--- Enable CLR integration
-sp_configure 'clr enabled', 1;  
-GO  
-RECONFIGURE;  
-```
-
-### 2. Set the Database as Trustworthy
-
-For the CLR assembly to work, you need to set the target database as trustworthy. Replace `[GPS_Tracking]` with the name of your database:
-
-```sql
-ALTER DATABASE [GPS_Tracking] SET TRUSTWORTHY ON;
+-- 2. Set database as trustworthy
+ALTER DATABASE [YourDatabase] SET TRUSTWORTHY ON;
 GO
-```
 
-### 3. Create the CLR Assembly
+-- 3. Create assembly (update path)
+USE [YourDatabase];
+GO
 
-Deploy the CLR assembly to your SQL Server instance. Update the path to the DLL file (`D:\GisSqlServerCLR.dll`) as needed:
-
-```sql
 CREATE ASSEMBLY GisSqlServerCLR
 FROM N'D:\GisSqlServerCLR.dll'
 WITH PERMISSION_SET = UNSAFE;
 GO
-```
 
-### 4. Create the Geometry Transformation Function
-
-Finally, create the custom SQL function for transforming geometries. This function takes a geometry object and a destination spatial reference ID (SRID) as input and returns the transformed geometry:
-
-```sql
+-- 4. Create functions
 CREATE FUNCTION dbo.STTransform(@Geometry geometry, @dst int)
 RETURNS geometry
-AS
-EXTERNAL NAME [GisSqlServerCLR].[SpatialReprojection].TransformGeometry;
+AS EXTERNAL NAME [GisSqlServerCLR].[SpatialReprojection].TransformGeometry;
 GO
 
 CREATE FUNCTION dbo.STTransformWkt(@wkt NVARCHAR(MAX), @src int, @dst int)
 RETURNS NVARCHAR(MAX)
-AS
-EXTERNAL NAME [GisSqlServerCLR].[SpatialReprojection].TransformWktGeometry;
+AS EXTERNAL NAME [GisSqlServerCLR].[SpatialReprojection].TransformWktGeometry;
 GO
 
 CREATE AGGREGATE dbo.STExtent(@geometry GEOMETRY)
 RETURNS NVARCHAR(MAX)
 EXTERNAL NAME [GisSqlServerCLR].[SpatialExtent];
 GO
+
+-- 5. Test installation
+SELECT dbo.STTransform(
+    geometry::STGeomFromText('POINT (51.3890 35.6892)', 4326), 
+    3857
+).STAsText();
 ```
 
-## Usage
-
-Once the setup is complete, you can use the `dbo.STTransform` function in your SQL queries to transform geometries. For example:
+### Update Assembly
 
 ```sql
-SELECT dbo.STTransform(geometry::STGeomFromText('POINT (30 10)', 4326), 3857);
+-- Drop functions
+DROP FUNCTION IF EXISTS dbo.STTransform;
+DROP FUNCTION IF EXISTS dbo.STTransformWkt;
+DROP AGGREGATE IF EXISTS dbo.STExtent;
+GO
+
+-- Drop and recreate assembly
+DROP ASSEMBLY IF EXISTS GisSqlServerCLR;
+GO
+
+CREATE ASSEMBLY GisSqlServerCLR
+FROM N'D:\GisSqlServerCLR.dll'
+WITH PERMISSION_SET = UNSAFE;
+GO
+
+-- Recreate functions (use code from installation section)
 ```
 
-This query transforms a geometry from SRID 4326 (WGS 84) to SRID 3857 (Web Mercator).
+### Uninstall
 
-## Notes
+```sql
+-- Remove all components
+DROP FUNCTION IF EXISTS dbo.STTransform;
+DROP FUNCTION IF EXISTS dbo.STTransformWkt;
+DROP AGGREGATE IF EXISTS dbo.STExtent;
+DROP ASSEMBLY IF EXISTS GisSqlServerCLR;
+GO
 
-- Ensure that the DLL file (`GisSqlServerCLR.dll`) is accessible by the SQL Server instance.
-- The database must remain trustworthy for the CLR assembly to function properly.
-- Use `PERMISSION_SET = UNSAFE` cautiously, as it grants elevated permissions to the assembly.
+-- Optional: Disable CLR
+-- EXEC sp_configure 'clr enabled', 0; RECONFIGURE;
+```
 
-## License
+## Usage Examples
 
-This project is released with no restrictions. You are free to use, modify, and distribute it as you see fit.
+```sql
+-- Transform point WGS84 ? Web Mercator
+SELECT dbo.STTransform(
+    geometry::STGeomFromText('POINT (51.3890 35.6892)', 4326), 
+    3857
+).STAsText();
+
+-- Transform WKT
+SELECT dbo.STTransformWkt('POLYGON ((51 35, 52 35, 52 36, 51 36, 51 35))', 4326, 32639);
+
+-- Calculate extent
+SELECT dbo.STExtent(Location) FROM Locations;
+
+-- Calculate area in meters
+DECLARE @area GEOMETRY = geometry::STGeomFromText('POLYGON ((51 35, 51.01 35, 51.01 35.01, 51 35.01, 51 35))', 4326);
+SELECT dbo.STTransform(@area, 32639).STArea() AS SquareMeters;
+
+-- Batch transform
+UPDATE Locations SET WebMercator = dbo.STTransform(Location, 3857) WHERE Location IS NOT NULL;
+```
+
+## Diagnostics
+
+```sql
+-- Check CLR status
+SELECT name, value, value_in_use FROM sys.configurations WHERE name = 'clr enabled';
+
+-- Check database trustworthy
+SELECT name, is_trustworthy_on FROM sys.databases WHERE name = DB_NAME();
+
+-- Check assembly
+SELECT * FROM sys.assemblies WHERE name = 'GisSqlServerCLR';
+
+-- Check functions
+SELECT name, type_desc FROM sys.objects 
+WHERE name IN ('STTransform', 'STTransformWkt', 'STExtent');
+
+-- Run test
+DECLARE @test GEOMETRY = geometry::STGeomFromText('POINT (51.3890 35.6892)', 4326);
+DECLARE @result GEOMETRY = dbo.STTransform(@test, 3857);
+SELECT 
+    CASE WHEN @result IS NOT NULL THEN '? Working' ELSE '? Failed' END AS Status,
+    @result.STAsText() AS Result;
+```
+
+## Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| CLR not enabled | `EXEC sp_configure 'clr enabled', 1; RECONFIGURE;` |
+| Assembly not trusted | `ALTER DATABASE [YourDB] SET TRUSTWORTHY ON;` |
+| Assembly not found | Check DLL path and SQL Server read permissions |
+| Unsupported EPSG | Modify `GetProjectionFromEpsg` in `SpatialReprojection.cs` |
+| Invalid geometry | Verify with `@geometry.STIsValid()` |
+
+## Security Notes
+
+- Uses `PERMISSION_SET = UNSAFE` (required for DotSpatial)
+- Set `TRUSTWORTHY ON` only on trusted databases
