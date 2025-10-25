@@ -21,41 +21,111 @@ public class SpatialExtent : IBinarySerialize
 
     public void Init()
     {
-        _minX = 0;
-        _minY = 0;
-        _maxX = 0;
-        _maxY = 0;
+        _minX = double.MaxValue;
+        _minY = double.MaxValue;
+        _maxX = double.MinValue;
+        _maxY = double.MinValue;
         _hasValues = false;
     }
 
     public void Accumulate(SqlGeometry geometry)
     {
         if (geometry == null || geometry.IsNull)
+        {
             return;
+        }
 
-        _minX = Math.Min(_minX, geometry.STEnvelope().STPointN(1).STX.Value);
-        _minY = Math.Min(_minY, geometry.STEnvelope().STPointN(1).STY.Value);
-        _maxX = Math.Max(_maxX, geometry.STEnvelope().STPointN(3).STX.Value);
-        _maxY = Math.Max(_maxY, geometry.STEnvelope().STPointN(3).STY.Value);
+        if (geometry.STIsEmpty().IsTrue)
+        {
+            return;
+        }
 
-        _hasValues = true;
+
+        if (geometry.STIsValid().IsFalse)
+        {
+            return;
+        }
+
+        var envelope = geometry.STEnvelope();
+        
+        if (envelope.IsNull || envelope.STIsEmpty().IsTrue)
+        {
+            return;
+        }
+
+        var numPoints = envelope.STNumPoints();
+        if (numPoints.IsNull || numPoints.Value < 3)
+        {
+            return;
+        }
+
+        var point1 = envelope.STPointN(1);
+        var point3 = envelope.STPointN(3);
+        
+        if (point1 != null && !point1.IsNull && point3 != null && !point3.IsNull)
+        {
+            var x1 = point1.STX;
+            var y1 = point1.STY;
+            var x3 = point3.STX;
+            var y3 = point3.STY;
+
+            if (x1.IsNull || y1.IsNull || x3.IsNull || y3.IsNull)
+            {
+                return;
+            }
+
+            double minX = x1.Value;
+            double minY = y1.Value;
+            double maxX = x3.Value;
+            double maxY = y3.Value;
+            
+            if (!_hasValues)
+            {
+                _minX = minX;
+                _minY = minY;
+                _maxX = maxX;
+                _maxY = maxY;
+                _hasValues = true;
+            }
+            else
+            {
+                _minX = Math.Min(_minX, minX);
+                _minY = Math.Min(_minY, minY);
+                _maxX = Math.Max(_maxX, maxX);
+                _maxY = Math.Max(_maxY, maxY);
+            }
+        }
     }
 
     public void Merge(SpatialExtent group)
     {
         if (group._hasValues)
         {
-            _minX = Math.Min(_minX, group._minX);
-            _minY = Math.Min(_minY, group._minY);
-            _maxX = Math.Max(_maxX, group._maxX);
-            _maxY = Math.Max(_maxY, group._maxY);
-            _hasValues = true;
+            if (!_hasValues)
+            {
+                _minX = group._minX;
+                _minY = group._minY;
+                _maxX = group._maxX;
+                _maxY = group._maxY;
+                _hasValues = true;
+            }
+            else
+            {
+                _minX = Math.Min(_minX, group._minX);
+                _minY = Math.Min(_minY, group._minY);
+                _maxX = Math.Max(_maxX, group._maxX);
+                _maxY = Math.Max(_maxY, group._maxY);
+            }
         }
     }
 
     public SqlString Terminate()
     {
-
+        if (!_hasValues)
+        {
+            return SqlString.Null;
+        }
+        
         return new SqlString($"BOX({_minX} {_minY}, {_maxX} {_maxY})");
     }
 
