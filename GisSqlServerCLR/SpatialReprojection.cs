@@ -371,6 +371,50 @@ public class SpatialReprojection
 
     private static void TransformCoordinate(ref double x, ref double y, int sourceProj, int destinationProj)
     {
+        // Handle IRNG (Iran National Grid) transformations directly
+        const int IRNG_SRID = 102030;
+        const int WGS84_SRID = 4326;
+
+        if (sourceProj == IRNG_SRID || destinationProj == IRNG_SRID)
+        {
+            if (sourceProj == WGS84_SRID && destinationProj == IRNG_SRID)
+            {
+                // WGS84 to IRNG
+                IranNationalGrid.GeographicToIRNGInternal(x, y, out double easting, out double northing);
+                x = easting;
+                y = northing;
+                return;
+            }
+            else if (sourceProj == IRNG_SRID && destinationProj == WGS84_SRID)
+            {
+                // IRNG to WGS84
+                IranNationalGrid.IRNGToGeographicInternal(x, y, out double lon, out double lat);
+                x = lon;
+                y = lat;
+                return;
+            }
+            else if (sourceProj == IRNG_SRID)
+            {
+                // IRNG to other: first convert to WGS84
+                IranNationalGrid.IRNGToGeographicInternal(x, y, out double lon, out double lat);
+                x = lon;
+                y = lat;
+                // Then convert WGS84 to destination
+                TransformCoordinate(ref x, ref y, WGS84_SRID, destinationProj);
+                return;
+            }
+            else if (destinationProj == IRNG_SRID)
+            {
+                // Other to IRNG: first convert to WGS84
+                TransformCoordinate(ref x, ref y, sourceProj, WGS84_SRID);
+                // Then convert WGS84 to IRNG
+                IranNationalGrid.GeographicToIRNGInternal(x, y, out double easting, out double northing);
+                x = easting;
+                y = northing;
+                return;
+            }
+        }
+
         double[] xy = { x, y };
         double[] z = { 0 };
 
