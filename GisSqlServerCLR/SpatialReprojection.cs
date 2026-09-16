@@ -1,15 +1,33 @@
-﻿using System;
+using System;
 using System.Data.SqlTypes;
 using System.Globalization;
 using System.Text;
 using Microsoft.SqlServer.Server;
 using Microsoft.SqlServer.Types;
 
+/// <summary>
+/// SQL Server CLR functions for spatial coordinate transformations
+/// </summary>
 public class SpatialReprojection
 {
-    [SqlFunction(
-        IsDeterministic = true,
-        IsPrecise = true)]
+    // G17 format ensures round-trip accuracy for double (17 significant digits)
+    private const string COORDINATE_FORMAT = "G17";
+
+    // Reusable arrays for coordinate transformation (avoids allocation per call)
+    [ThreadStatic]
+    private static double[] _xyBuffer;
+    [ThreadStatic]
+    private static double[] _zBuffer;
+
+    private static double[] XYBuffer => _xyBuffer ?? (_xyBuffer = new double[2]);
+    private static double[] ZBuffer => _zBuffer ?? (_zBuffer = new double[1]);
+
+    #region Public SQL Functions
+
+    /// <summary>
+    /// Transforms WKT geometry string from source to destination projection
+    /// </summary>
+    [SqlFunction(IsDeterministic = true, IsPrecise = true)]
     public static SqlString TransformWktGeometry(string geometry, int srcProj, int dstProj)
     {
         if (string.IsNullOrWhiteSpace(geometry))
@@ -19,16 +37,18 @@ public class SpatialReprojection
 
         try
         {
-            SqlGeometry geom = SqlGeometry.STGeomFromText(new SqlChars(geometry), srcProj);
+            string trimmed = geometry.Trim();
 
-            SqlGeometry transformed = TransformGeometry(geom, dstProj);
-
-            if (transformed.IsNull)
+            // Handle BOX format (non-standard WKT)
+            if (trimmed.StartsWith("BOX", StringComparison.OrdinalIgnoreCase))
             {
-                return SqlString.Null;
+                return TransformBoxGeometry(trimmed, srcProj, dstProj);
             }
 
-            return transformed.STAsText().ToSqlString();
+            SqlGeometry geom = SqlGeometry.STGeomFromText(new SqlChars(geometry), srcProj);
+            SqlGeometry transformed = TransformGeometry(geom, dstProj);
+
+            return transformed.IsNull ? SqlString.Null : transformed.STAsText().ToSqlString();
         }
         catch (Exception ex)
         {
@@ -36,9 +56,10 @@ public class SpatialReprojection
         }
     }
 
-    [SqlFunction(
-        IsDeterministic = true,
-        IsPrecise = true)]
+    /// <summary>
+    /// Transforms SqlGeometry from its SRID to destination projection
+    /// </summary>
+    [SqlFunction(IsDeterministic = true, IsPrecise = true)]
     public static SqlGeometry TransformGeometry(SqlGeometry geometry, int dstProj)
     {
         if (geometry == null || geometry.IsNull)
@@ -48,8 +69,7 @@ public class SpatialReprojection
 
         try
         {
-            SqlInt32 sqlSrid = geometry.STSrid;
-            int srcProj = sqlSrid.Value;
+            int srcProj = geometry.STSrid.Value;
 
             if (srcProj == dstProj)
             {
@@ -64,8 +84,88 @@ public class SpatialReprojection
         }
     }
 
+    #endregion
+
+    #region BOX Format Handling
+
+    private static SqlString TransformBoxGeometry(string boxWkt, int srcProj, int dstProj)
+    {
+        // Parse BOX(minX minY, maxX maxY) format
+        int startParen = boxWkt.IndexOf('(');
+        int endParen = boxWkt.LastIndexOf(')');
+
+        if (startParen == -1 || endParen == -1 || endParen <= startParen)
+        {
+            throw new ArgumentException("Invalid BOX format. Expected: BOX(x1 y1, x2 y2)");
+        }
+
+        string coordinates = boxWkt.Substring(startParen + 1, endParen - startParen - 1);
+        string[] points = coordinates.Split(',');
+
+        if (points.Length != 2)
+        {
+            throw new ArgumentException("BOX format must contain exactly two coordinate pairs separated by comma");
+        }
+
+        // Parse first point (minX, minY)
+        string[] coord1 = points[0].Trim().Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+        if (coord1.Length < 2)
+        {
+            throw new ArgumentException("Invalid coordinates in BOX format");
+        }
+
+        double minX = double.Parse(coord1[0], CultureInfo.InvariantCulture);
+        double minY = double.Parse(coord1[1], CultureInfo.InvariantCulture);
+
+        // Parse second point (maxX, maxY)
+        string[] coord2 = points[1].Trim().Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+        if (coord2.Length < 2)
+        {
+            throw new ArgumentException("Invalid coordinates in BOX format");
+        }
+
+        double maxX = double.Parse(coord2[0], CultureInfo.InvariantCulture);
+        double maxY = double.Parse(coord2[1], CultureInfo.InvariantCulture);
+
+        // Transform all 4 corners to handle projection distortion
+        double x1 = minX, y1 = minY;  // bottom-left
+        double x2 = maxX, y2 = minY;  // bottom-right
+        double x3 = maxX, y3 = maxY;  // top-right
+        double x4 = minX, y4 = maxY;  // top-left
+
+        TransformCoordinate(ref x1, ref y1, srcProj, dstProj);
+        TransformCoordinate(ref x2, ref y2, srcProj, dstProj);
+        TransformCoordinate(ref x3, ref y3, srcProj, dstProj);
+        TransformCoordinate(ref x4, ref y4, srcProj, dstProj);
+
+        // Calculate new bounding box from all 4 transformed corners
+        double newMinX = Math.Min(Math.Min(x1, x2), Math.Min(x3, x4));
+        double newMaxX = Math.Max(Math.Max(x1, x2), Math.Max(x3, x4));
+        double newMinY = Math.Min(Math.Min(y1, y2), Math.Min(y3, y4));
+        double newMaxY = Math.Max(Math.Max(y1, y2), Math.Max(y3, y4));
+
+        // Format result as BOX
+        string result = string.Format(
+            CultureInfo.InvariantCulture,
+            "BOX({0} {1}, {2} {3})",
+            newMinX.ToString(COORDINATE_FORMAT, CultureInfo.InvariantCulture),
+            newMinY.ToString(COORDINATE_FORMAT, CultureInfo.InvariantCulture),
+            newMaxX.ToString(COORDINATE_FORMAT, CultureInfo.InvariantCulture),
+            newMaxY.ToString(COORDINATE_FORMAT, CultureInfo.InvariantCulture));
+        return new SqlString(result);
+    }
+
+    #endregion
+
+    #region Geometry Processing
+
     private static SqlGeometry ProcessGeometry(SqlGeometry geometry, int sourceProj, int destinationProj)
     {
+        if (geometry.STIsEmpty().IsTrue)
+        {
+            return SqlGeometry.STGeomFromText(new SqlChars(geometry.STAsText().Value), destinationProj);
+        }
+
         string geometryType = geometry.STGeometryType().Value;
 
         switch (geometryType.ToUpper())
@@ -110,7 +210,7 @@ public class SpatialReprojection
     private static SqlGeometry TransformLineString(SqlGeometry lineString, int sourceProj, int destinationProj)
     {
         int numPoints = lineString.STNumPoints().Value;
-        StringBuilder wktBuilder = new StringBuilder("LINESTRING (");
+        StringBuilder wktBuilder = new StringBuilder("LINESTRING (", 64 + numPoints * 50);
 
         for (int i = 1; i <= numPoints; i++)
         {
@@ -292,10 +392,17 @@ public class SpatialReprojection
         return ringBuilder.ToString();
     }
 
+    #endregion
+
+    #region Coordinate Transformation
+
     private static void TransformCoordinate(ref double x, ref double y, int sourceProj, int destinationProj)
     {
-        double[] xy = { x, y };
-        double[] z = { 0 };
+        double[] xy = XYBuffer;
+        double[] z = ZBuffer;
+        xy[0] = x;
+        xy[1] = y;
+        z[0] = 0;
 
         var sourceProjection = GetProjectionFromEpsg(sourceProj);
         var destinationProjection = GetProjectionFromEpsg(destinationProj);
@@ -306,6 +413,10 @@ public class SpatialReprojection
         y = xy[1];
     }
 
+    #endregion
+
+    #region Formatting Helpers
+
     private static string FormatPoint(double x, double y)
     {
         return $"POINT ({FormatCoordinate(x, y)})";
@@ -313,14 +424,19 @@ public class SpatialReprojection
 
     private static string FormatCoordinate(double x, double y)
     {
-        double roundedX = Math.Round(x, 10);
-        double roundedY = Math.Round(y, 10);
-
-        return $"{roundedX.ToString("G17", CultureInfo.InvariantCulture)} {roundedY.ToString("G17", CultureInfo.InvariantCulture)}";
+        return string.Concat(
+            x.ToString(COORDINATE_FORMAT, CultureInfo.InvariantCulture),
+            " ",
+            y.ToString(COORDINATE_FORMAT, CultureInfo.InvariantCulture));
     }
+
+    #endregion
+
+    #region Projection Helpers
 
     private static DotSpatial.Projections.ProjectionInfo GetProjectionFromEpsg(int epsgCode)
     {
+        // Try to load from DotSpatial database first
         try
         {
             var projection = DotSpatial.Projections.ProjectionInfo.FromAuthorityCode("EPSG", epsgCode);
@@ -331,140 +447,167 @@ public class SpatialReprojection
         }
         catch
         {
+            // Continue to hardcoded mappings
         }
+
+        // Common projections
+        if (epsgCode == 4326)
+            return DotSpatial.Projections.KnownCoordinateSystems.Geographic.World.WGS1984;
+
+        if (epsgCode == 3857)
+            return DotSpatial.Projections.KnownCoordinateSystems.Projected.World.WebMercator;
+
+        // UTM zones
+        if (epsgCode >= 32601 && epsgCode <= 32660)
+            return GetUtmNorthProjection(epsgCode);
+
+        if (epsgCode >= 32701 && epsgCode <= 32760)
+            return GetUtmSouthProjection(epsgCode);
+
+        throw new ArgumentException($"EPSG:{epsgCode} not supported. Add it manually or ensure projection database is available.");
+    }
+
+    private static DotSpatial.Projections.ProjectionInfo GetUtmNorthProjection(int epsgCode)
+    {
+        var utmWgs84 = DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984;
 
         switch (epsgCode)
         {
-            case 4326:
-                return DotSpatial.Projections.KnownCoordinateSystems.Geographic.World.WGS1984;
-
-            case 3857:
-                return DotSpatial.Projections.KnownCoordinateSystems.Projected.World.WebMercator;
-
-            case 32601: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone1N;
-            case 32602: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone2N;
-            case 32603: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone3N;
-            case 32604: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone4N;
-            case 32605: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone5N;
-            case 32606: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone6N;
-            case 32607: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone7N;
-            case 32608: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone8N;
-            case 32609: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone9N;
-            case 32610: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone10N;
-            case 32611: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone11N;
-            case 32612: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone12N;
-            case 32613: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone13N;
-            case 32614: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone14N;
-            case 32615: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone15N;
-            case 32616: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone16N;
-            case 32617: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone17N;
-            case 32618: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone18N;
-            case 32619: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone19N;
-            case 32620: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone20N;
-            case 32621: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone21N;
-            case 32622: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone22N;
-            case 32623: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone23N;
-            case 32624: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone24N;
-            case 32625: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone25N;
-            case 32626: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone26N;
-            case 32627: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone27N;
-            case 32628: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone28N;
-            case 32629: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone29N;
-            case 32630: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone30N;
-            case 32631: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone31N;
-            case 32632: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone32N;
-            case 32633: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone33N;
-            case 32634: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone34N;
-            case 32635: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone35N;
-            case 32636: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone36N;
-            case 32637: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone37N;
-            case 32638: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone38N;
-            case 32639: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone39N;
-            case 32640: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone40N;
-            case 32641: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone41N;
-            case 32642: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone42N;
-            case 32643: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone43N;
-            case 32644: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone44N;
-            case 32645: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone45N;
-            case 32646: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone46N;
-            case 32647: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone47N;
-            case 32648: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone48N;
-            case 32649: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone49N;
-            case 32650: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone50N;
-            case 32651: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone51N;
-            case 32652: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone52N;
-            case 32653: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone53N;
-            case 32654: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone54N;
-            case 32655: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone55N;
-            case 32656: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone56N;
-            case 32657: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone57N;
-            case 32658: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone58N;
-            case 32659: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone59N;
-            case 32660: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone60N;
-
-            case 32701: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone1S;
-            case 32702: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone2S;
-            case 32703: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone3S;
-            case 32704: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone4S;
-            case 32705: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone5S;
-            case 32706: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone6S;
-            case 32707: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone7S;
-            case 32708: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone8S;
-            case 32709: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone9S;
-            case 32710: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone10S;
-            case 32711: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone11S;
-            case 32712: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone12S;
-            case 32713: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone13S;
-            case 32714: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone14S;
-            case 32715: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone15S;
-            case 32716: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone16S;
-            case 32717: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone17S;
-            case 32718: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone18S;
-            case 32719: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone19S;
-            case 32720: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone20S;
-            case 32721: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone21S;
-            case 32722: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone22S;
-            case 32723: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone23S;
-            case 32724: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone24S;
-            case 32725: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone25S;
-            case 32726: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone26S;
-            case 32727: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone27S;
-            case 32728: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone28S;
-            case 32729: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone29S;
-            case 32730: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone30S;
-            case 32731: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone31S;
-            case 32732: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone32S;
-            case 32733: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone33S;
-            case 32734: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone34S;
-            case 32735: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone35S;
-            case 32736: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone36S;
-            case 32737: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone37S;
-            case 32738: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone38S;
-            case 32739: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone39S;
-            case 32740: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone40S;
-            case 32741: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone41S;
-            case 32742: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone42S;
-            case 32743: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone43S;
-            case 32744: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone44S;
-            case 32745: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone45S;
-            case 32746: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone46S;
-            case 32747: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone47S;
-            case 32748: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone48S;
-            case 32749: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone49S;
-            case 32750: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone50S;
-            case 32751: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone51S;
-            case 32752: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone52S;
-            case 32753: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone53S;
-            case 32754: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone54S;
-            case 32755: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone55S;
-            case 32756: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone56S;
-            case 32757: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone57S;
-            case 32758: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone58S;
-            case 32759: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone59S;
-            case 32760: return DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984.WGS1984UTMZone60S;
-
+            case 32601: return utmWgs84.WGS1984UTMZone1N;
+            case 32602: return utmWgs84.WGS1984UTMZone2N;
+            case 32603: return utmWgs84.WGS1984UTMZone3N;
+            case 32604: return utmWgs84.WGS1984UTMZone4N;
+            case 32605: return utmWgs84.WGS1984UTMZone5N;
+            case 32606: return utmWgs84.WGS1984UTMZone6N;
+            case 32607: return utmWgs84.WGS1984UTMZone7N;
+            case 32608: return utmWgs84.WGS1984UTMZone8N;
+            case 32609: return utmWgs84.WGS1984UTMZone9N;
+            case 32610: return utmWgs84.WGS1984UTMZone10N;
+            case 32611: return utmWgs84.WGS1984UTMZone11N;
+            case 32612: return utmWgs84.WGS1984UTMZone12N;
+            case 32613: return utmWgs84.WGS1984UTMZone13N;
+            case 32614: return utmWgs84.WGS1984UTMZone14N;
+            case 32615: return utmWgs84.WGS1984UTMZone15N;
+            case 32616: return utmWgs84.WGS1984UTMZone16N;
+            case 32617: return utmWgs84.WGS1984UTMZone17N;
+            case 32618: return utmWgs84.WGS1984UTMZone18N;
+            case 32619: return utmWgs84.WGS1984UTMZone19N;
+            case 32620: return utmWgs84.WGS1984UTMZone20N;
+            case 32621: return utmWgs84.WGS1984UTMZone21N;
+            case 32622: return utmWgs84.WGS1984UTMZone22N;
+            case 32623: return utmWgs84.WGS1984UTMZone23N;
+            case 32624: return utmWgs84.WGS1984UTMZone24N;
+            case 32625: return utmWgs84.WGS1984UTMZone25N;
+            case 32626: return utmWgs84.WGS1984UTMZone26N;
+            case 32627: return utmWgs84.WGS1984UTMZone27N;
+            case 32628: return utmWgs84.WGS1984UTMZone28N;
+            case 32629: return utmWgs84.WGS1984UTMZone29N;
+            case 32630: return utmWgs84.WGS1984UTMZone30N;
+            case 32631: return utmWgs84.WGS1984UTMZone31N;
+            case 32632: return utmWgs84.WGS1984UTMZone32N;
+            case 32633: return utmWgs84.WGS1984UTMZone33N;
+            case 32634: return utmWgs84.WGS1984UTMZone34N;
+            case 32635: return utmWgs84.WGS1984UTMZone35N;
+            case 32636: return utmWgs84.WGS1984UTMZone36N;
+            case 32637: return utmWgs84.WGS1984UTMZone37N;
+            case 32638: return utmWgs84.WGS1984UTMZone38N;
+            case 32639: return utmWgs84.WGS1984UTMZone39N;
+            case 32640: return utmWgs84.WGS1984UTMZone40N;
+            case 32641: return utmWgs84.WGS1984UTMZone41N;
+            case 32642: return utmWgs84.WGS1984UTMZone42N;
+            case 32643: return utmWgs84.WGS1984UTMZone43N;
+            case 32644: return utmWgs84.WGS1984UTMZone44N;
+            case 32645: return utmWgs84.WGS1984UTMZone45N;
+            case 32646: return utmWgs84.WGS1984UTMZone46N;
+            case 32647: return utmWgs84.WGS1984UTMZone47N;
+            case 32648: return utmWgs84.WGS1984UTMZone48N;
+            case 32649: return utmWgs84.WGS1984UTMZone49N;
+            case 32650: return utmWgs84.WGS1984UTMZone50N;
+            case 32651: return utmWgs84.WGS1984UTMZone51N;
+            case 32652: return utmWgs84.WGS1984UTMZone52N;
+            case 32653: return utmWgs84.WGS1984UTMZone53N;
+            case 32654: return utmWgs84.WGS1984UTMZone54N;
+            case 32655: return utmWgs84.WGS1984UTMZone55N;
+            case 32656: return utmWgs84.WGS1984UTMZone56N;
+            case 32657: return utmWgs84.WGS1984UTMZone57N;
+            case 32658: return utmWgs84.WGS1984UTMZone58N;
+            case 32659: return utmWgs84.WGS1984UTMZone59N;
+            case 32660: return utmWgs84.WGS1984UTMZone60N;
             default:
-                throw new ArgumentException($"EPSG:{epsgCode} not supported. Add it manually or ensure projection database is available.");
+                throw new ArgumentException($"EPSG:{epsgCode} not supported.");
         }
     }
+
+    private static DotSpatial.Projections.ProjectionInfo GetUtmSouthProjection(int epsgCode)
+    {
+        var utmWgs84 = DotSpatial.Projections.KnownCoordinateSystems.Projected.UtmWgs1984;
+
+        switch (epsgCode)
+        {
+            case 32701: return utmWgs84.WGS1984UTMZone1S;
+            case 32702: return utmWgs84.WGS1984UTMZone2S;
+            case 32703: return utmWgs84.WGS1984UTMZone3S;
+            case 32704: return utmWgs84.WGS1984UTMZone4S;
+            case 32705: return utmWgs84.WGS1984UTMZone5S;
+            case 32706: return utmWgs84.WGS1984UTMZone6S;
+            case 32707: return utmWgs84.WGS1984UTMZone7S;
+            case 32708: return utmWgs84.WGS1984UTMZone8S;
+            case 32709: return utmWgs84.WGS1984UTMZone9S;
+            case 32710: return utmWgs84.WGS1984UTMZone10S;
+            case 32711: return utmWgs84.WGS1984UTMZone11S;
+            case 32712: return utmWgs84.WGS1984UTMZone12S;
+            case 32713: return utmWgs84.WGS1984UTMZone13S;
+            case 32714: return utmWgs84.WGS1984UTMZone14S;
+            case 32715: return utmWgs84.WGS1984UTMZone15S;
+            case 32716: return utmWgs84.WGS1984UTMZone16S;
+            case 32717: return utmWgs84.WGS1984UTMZone17S;
+            case 32718: return utmWgs84.WGS1984UTMZone18S;
+            case 32719: return utmWgs84.WGS1984UTMZone19S;
+            case 32720: return utmWgs84.WGS1984UTMZone20S;
+            case 32721: return utmWgs84.WGS1984UTMZone21S;
+            case 32722: return utmWgs84.WGS1984UTMZone22S;
+            case 32723: return utmWgs84.WGS1984UTMZone23S;
+            case 32724: return utmWgs84.WGS1984UTMZone24S;
+            case 32725: return utmWgs84.WGS1984UTMZone25S;
+            case 32726: return utmWgs84.WGS1984UTMZone26S;
+            case 32727: return utmWgs84.WGS1984UTMZone27S;
+            case 32728: return utmWgs84.WGS1984UTMZone28S;
+            case 32729: return utmWgs84.WGS1984UTMZone29S;
+            case 32730: return utmWgs84.WGS1984UTMZone30S;
+            case 32731: return utmWgs84.WGS1984UTMZone31S;
+            case 32732: return utmWgs84.WGS1984UTMZone32S;
+            case 32733: return utmWgs84.WGS1984UTMZone33S;
+            case 32734: return utmWgs84.WGS1984UTMZone34S;
+            case 32735: return utmWgs84.WGS1984UTMZone35S;
+            case 32736: return utmWgs84.WGS1984UTMZone36S;
+            case 32737: return utmWgs84.WGS1984UTMZone37S;
+            case 32738: return utmWgs84.WGS1984UTMZone38S;
+            case 32739: return utmWgs84.WGS1984UTMZone39S;
+            case 32740: return utmWgs84.WGS1984UTMZone40S;
+            case 32741: return utmWgs84.WGS1984UTMZone41S;
+            case 32742: return utmWgs84.WGS1984UTMZone42S;
+            case 32743: return utmWgs84.WGS1984UTMZone43S;
+            case 32744: return utmWgs84.WGS1984UTMZone44S;
+            case 32745: return utmWgs84.WGS1984UTMZone45S;
+            case 32746: return utmWgs84.WGS1984UTMZone46S;
+            case 32747: return utmWgs84.WGS1984UTMZone47S;
+            case 32748: return utmWgs84.WGS1984UTMZone48S;
+            case 32749: return utmWgs84.WGS1984UTMZone49S;
+            case 32750: return utmWgs84.WGS1984UTMZone50S;
+            case 32751: return utmWgs84.WGS1984UTMZone51S;
+            case 32752: return utmWgs84.WGS1984UTMZone52S;
+            case 32753: return utmWgs84.WGS1984UTMZone53S;
+            case 32754: return utmWgs84.WGS1984UTMZone54S;
+            case 32755: return utmWgs84.WGS1984UTMZone55S;
+            case 32756: return utmWgs84.WGS1984UTMZone56S;
+            case 32757: return utmWgs84.WGS1984UTMZone57S;
+            case 32758: return utmWgs84.WGS1984UTMZone58S;
+            case 32759: return utmWgs84.WGS1984UTMZone59S;
+            case 32760: return utmWgs84.WGS1984UTMZone60S;
+            default:
+                throw new ArgumentException($"EPSG:{epsgCode} not supported.");
+        }
+    }
+
+    #endregion
 }

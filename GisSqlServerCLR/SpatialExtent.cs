@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Data.SqlTypes;
+using System.Globalization;
 using Microsoft.SqlServer.Server;
 using Microsoft.SqlServer.Types;
 
@@ -74,10 +75,10 @@ public class SpatialExtent : IBinarySerialize
                 return;
             }
 
-            double minX = x1.Value;
-            double minY = y1.Value;
-            double maxX = x3.Value;
-            double maxY = y3.Value;
+            double minX = Math.Min(x1.Value, x3.Value);
+            double minY = Math.Min(y1.Value, y3.Value);
+            double maxX = Math.Max(x1.Value, x3.Value);
+            double maxY = Math.Max(y1.Value, y3.Value);
             
             if (!_hasValues)
             {
@@ -126,7 +127,10 @@ public class SpatialExtent : IBinarySerialize
             return SqlString.Null;
         }
         
-        return new SqlString($"BOX({_minX} {_minY}, {_maxX} {_maxY})");
+        return new SqlString(string.Format(
+            CultureInfo.InvariantCulture,
+            "BOX({0} {1}, {2} {3})",
+            _minX, _minY, _maxX, _maxY));
     }
 
     public void Read(System.IO.BinaryReader r)

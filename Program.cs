@@ -1,6 +1,7 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Data.SqlTypes;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -30,8 +31,8 @@ namespace GisSqlCLR
 
         static void TestBasicRoundTrip()
         {
-            Console.WriteLine("▶ Test 1: Basic Round-trip (WGS84 ↔ Web Mercator)");
-            Console.WriteLine("───────────────────────────────────────────────────────────────");
+            Console.WriteLine(">> Test 1: Basic Round-trip (WGS84 <-> Web Mercator)");
+            Console.WriteLine("-------------------------------------------------------------------");
 
             double lon = -74.0060;
             double lat = 40.7128;
@@ -59,8 +60,8 @@ namespace GisSqlCLR
 
         static void TestHighPrecision()
         {
-            Console.WriteLine("▶ Test 2: High Precision (14 decimal places)");
-            Console.WriteLine("───────────────────────────────────────────────────────────────");
+            Console.WriteLine(">> Test 2: High Precision (14 decimal places)");
+            Console.WriteLine("-------------------------------------------------------------------");
 
             var tests = new[]
             {
@@ -92,8 +93,8 @@ namespace GisSqlCLR
 
         static void TestMultipleEPSG()
         {
-            Console.WriteLine("▶ Test 3: Multiple EPSG Support");
-            Console.WriteLine("───────────────────────────────────────────────────────────────");
+            Console.WriteLine(">> Test 3: Multiple EPSG Support");
+            Console.WriteLine("-------------------------------------------------------------------");
 
             double lon = -74.0060;
             double lat = 40.7128;
@@ -138,13 +139,13 @@ namespace GisSqlCLR
         static string GetStatus(double lonError, double latError)
         {
             if (lonError < 1e-10 && latError < 1e-10)
-                return "✓ EXCELLENT (< 1e-10)";
+                return "EXCELLENT (< 1e-10)";
             else if (lonError < 1e-8 && latError < 1e-8)
-                return "✓ GOOD (< 1e-8)";
+                return "GOOD (< 1e-8)";
             else if (lonError < 1e-6 && latError < 1e-6)
-                return "⚠ ACCEPTABLE (< 1e-6)";
+                return "ACCEPTABLE (< 1e-6)";
             else
-                return "✗ POOR (≥ 1e-6)";
+                return "POOR (>= 1e-6)";
         }
 
         static double CalculateErrorMM(double lonError, double latError)
@@ -154,3 +155,4 @@ namespace GisSqlCLR
         }
     }
 }
+
