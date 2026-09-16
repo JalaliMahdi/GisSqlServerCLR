@@ -11,7 +11,16 @@ using Microsoft.SqlServer.Types;
 public class SpatialReprojection
 {
     // G17 format ensures round-trip accuracy for double (17 significant digits)
-  private const string COORDINATE_FORMAT = "G17";
+    private const string COORDINATE_FORMAT = "G17";
+
+    // Reusable arrays for coordinate transformation (avoids allocation per call)
+    [ThreadStatic]
+    private static double[] _xyBuffer;
+    [ThreadStatic]
+    private static double[] _zBuffer;
+
+    private static double[] XYBuffer => _xyBuffer ?? (_xyBuffer = new double[2]);
+    private static double[] ZBuffer => _zBuffer ?? (_zBuffer = new double[1]);
 
     #region Public SQL Functions
 
@@ -98,38 +107,51 @@ public class SpatialReprojection
             throw new ArgumentException("BOX format must contain exactly two coordinate pairs separated by comma");
         }
 
-        // Parse first point
+        // Parse first point (minX, minY)
         string[] coord1 = points[0].Trim().Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
         if (coord1.Length < 2)
         {
             throw new ArgumentException("Invalid coordinates in BOX format");
         }
 
-        double x1 = double.Parse(coord1[0], CultureInfo.InvariantCulture);
-        double y1 = double.Parse(coord1[1], CultureInfo.InvariantCulture);
+        double minX = double.Parse(coord1[0], CultureInfo.InvariantCulture);
+        double minY = double.Parse(coord1[1], CultureInfo.InvariantCulture);
 
-        // Parse second point
+        // Parse second point (maxX, maxY)
         string[] coord2 = points[1].Trim().Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
         if (coord2.Length < 2)
         {
             throw new ArgumentException("Invalid coordinates in BOX format");
         }
 
-        double x2 = double.Parse(coord2[0], CultureInfo.InvariantCulture);
-        double y2 = double.Parse(coord2[1], CultureInfo.InvariantCulture);
+        double maxX = double.Parse(coord2[0], CultureInfo.InvariantCulture);
+        double maxY = double.Parse(coord2[1], CultureInfo.InvariantCulture);
 
-        // Transform both corners
+        // Transform all 4 corners to handle projection distortion
+        double x1 = minX, y1 = minY;  // bottom-left
+        double x2 = maxX, y2 = minY;  // bottom-right
+        double x3 = maxX, y3 = maxY;  // top-right
+        double x4 = minX, y4 = maxY;  // top-left
+
         TransformCoordinate(ref x1, ref y1, srcProj, dstProj);
         TransformCoordinate(ref x2, ref y2, srcProj, dstProj);
+        TransformCoordinate(ref x3, ref y3, srcProj, dstProj);
+        TransformCoordinate(ref x4, ref y4, srcProj, dstProj);
 
-        // Ensure min/max order after transformation
-        double minX = Math.Min(x1, x2);
-        double maxX = Math.Max(x1, x2);
-        double minY = Math.Min(y1, y2);
-        double maxY = Math.Max(y1, y2);
+        // Calculate new bounding box from all 4 transformed corners
+        double newMinX = Math.Min(Math.Min(x1, x2), Math.Min(x3, x4));
+        double newMaxX = Math.Max(Math.Max(x1, x2), Math.Max(x3, x4));
+        double newMinY = Math.Min(Math.Min(y1, y2), Math.Min(y3, y4));
+        double newMaxY = Math.Max(Math.Max(y1, y2), Math.Max(y3, y4));
 
         // Format result as BOX
-        string result = $"BOX({FormatCoordinate(minX, minY)}, {FormatCoordinate(maxX, maxY)})";
+        string result = string.Format(
+            CultureInfo.InvariantCulture,
+            "BOX({0} {1}, {2} {3})",
+            newMinX.ToString(COORDINATE_FORMAT, CultureInfo.InvariantCulture),
+            newMinY.ToString(COORDINATE_FORMAT, CultureInfo.InvariantCulture),
+            newMaxX.ToString(COORDINATE_FORMAT, CultureInfo.InvariantCulture),
+            newMaxY.ToString(COORDINATE_FORMAT, CultureInfo.InvariantCulture));
         return new SqlString(result);
     }
 
@@ -139,6 +161,11 @@ public class SpatialReprojection
 
     private static SqlGeometry ProcessGeometry(SqlGeometry geometry, int sourceProj, int destinationProj)
     {
+        if (geometry.STIsEmpty().IsTrue)
+        {
+            return SqlGeometry.STGeomFromText(new SqlChars(geometry.STAsText().Value), destinationProj);
+        }
+
         string geometryType = geometry.STGeometryType().Value;
 
         switch (geometryType.ToUpper())
@@ -183,7 +210,7 @@ public class SpatialReprojection
     private static SqlGeometry TransformLineString(SqlGeometry lineString, int sourceProj, int destinationProj)
     {
         int numPoints = lineString.STNumPoints().Value;
-        StringBuilder wktBuilder = new StringBuilder("LINESTRING (");
+        StringBuilder wktBuilder = new StringBuilder("LINESTRING (", 64 + numPoints * 50);
 
         for (int i = 1; i <= numPoints; i++)
         {
@@ -371,52 +398,11 @@ public class SpatialReprojection
 
     private static void TransformCoordinate(ref double x, ref double y, int sourceProj, int destinationProj)
     {
-        // Handle IRNG (Iran National Grid) transformations directly
-        const int IRNG_SRID = 102030;
-        const int WGS84_SRID = 4326;
-
-        if (sourceProj == IRNG_SRID || destinationProj == IRNG_SRID)
-        {
-            if (sourceProj == WGS84_SRID && destinationProj == IRNG_SRID)
-            {
-                // WGS84 to IRNG
-                IranNationalGrid.GeographicToIRNGInternal(x, y, out double easting, out double northing);
-                x = easting;
-                y = northing;
-                return;
-            }
-            else if (sourceProj == IRNG_SRID && destinationProj == WGS84_SRID)
-            {
-                // IRNG to WGS84
-                IranNationalGrid.IRNGToGeographicInternal(x, y, out double lon, out double lat);
-                x = lon;
-                y = lat;
-                return;
-            }
-            else if (sourceProj == IRNG_SRID)
-            {
-                // IRNG to other: first convert to WGS84
-                IranNationalGrid.IRNGToGeographicInternal(x, y, out double lon, out double lat);
-                x = lon;
-                y = lat;
-                // Then convert WGS84 to destination
-                TransformCoordinate(ref x, ref y, WGS84_SRID, destinationProj);
-                return;
-            }
-            else if (destinationProj == IRNG_SRID)
-            {
-                // Other to IRNG: first convert to WGS84
-                TransformCoordinate(ref x, ref y, sourceProj, WGS84_SRID);
-                // Then convert WGS84 to IRNG
-                IranNationalGrid.GeographicToIRNGInternal(x, y, out double easting, out double northing);
-                x = easting;
-                y = northing;
-                return;
-            }
-        }
-
-        double[] xy = { x, y };
-        double[] z = { 0 };
+        double[] xy = XYBuffer;
+        double[] z = ZBuffer;
+        xy[0] = x;
+        xy[1] = y;
+        z[0] = 0;
 
         var sourceProjection = GetProjectionFromEpsg(sourceProj);
         var destinationProjection = GetProjectionFromEpsg(destinationProj);
@@ -438,9 +424,10 @@ public class SpatialReprojection
 
     private static string FormatCoordinate(double x, double y)
     {
-        // Use G17 directly without rounding to preserve maximum precision
-        // G17 ensures round-trip accuracy for double values (17 significant digits)
-   return $"{x.ToString(COORDINATE_FORMAT, CultureInfo.InvariantCulture)} {y.ToString(COORDINATE_FORMAT, CultureInfo.InvariantCulture)}";
+        return string.Concat(
+            x.ToString(COORDINATE_FORMAT, CultureInfo.InvariantCulture),
+            " ",
+            y.ToString(COORDINATE_FORMAT, CultureInfo.InvariantCulture));
     }
 
     #endregion
